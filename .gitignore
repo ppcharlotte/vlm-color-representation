@@ -1,0 +1,58 @@
+# Environment variables and secrets
+.env
+.env.local
+credentials.json
+secrets.json
+
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store
+
+# IDE settings
+.vscode/
+.idea/
+
+# Datasets
+data/raw/
+data/processed/
+data/external/
+
+# Model files and checkpoints
+models/
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.safetensors
+
+# Experiment outputs
+outputs/
+results/
+logs/
+wandb/
+*.log
+
+# Local cache
+.cache/
+huggingface_cache/
+
+# Build/package artifacts
+build/
+dist/
+*.egg-info/

@@ -1,0 +1,9 @@
+# Dependencies for scripts/run_generative_color_naming_experiment.py
+# For large VLMs, Python 3.10-3.12 is recommended.
+torch>=2.2
+torchvision>=0.17
+transformers>=4.48
+accelerate>=0.30
+Pillow>=10.0
+numpy>=1.26
+matplotlib>=3.8

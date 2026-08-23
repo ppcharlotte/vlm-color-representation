@@ -1,0 +1,9 @@
+# Core numerical/image dependencies used by dataset and analysis scripts
+numpy>=1.26
+Pillow>=10.0
+
+# CLIP/OpenCLIP embedding extraction for run_color_patch_alignment_experiment.py
+torch>=2.2
+torchvision>=0.17
+open_clip_torch>=2.24
+matplotlib>=3.8
