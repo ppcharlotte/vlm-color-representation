@@ -133,32 +133,6 @@ def main() -> None:
     plot_flag = ["--no-plots"] if args.no_plots else []
     if not args.skip_embeddings:
         run_step(
-            "answer-position embeddings",
-            [
-                py,
-                str(script_dir / "answer_position_embedding_analysis.py"),
-                "--ground-truth",
-                str(ground_truth),
-                "--dataset-root",
-                str(dataset_root),
-                "--output-dir",
-                str(output),
-                "--model-id",
-                args.model_id,
-                "--device",
-                args.device,
-                "--dtype",
-                args.dtype,
-                "--layer-indices",
-                args.layer_indices,
-                "--permutation-rounds",
-                str(args.permutation_rounds),
-                "--seed",
-                str(args.seed),
-                *plot_flag,
-            ],
-        )
-        run_step(
             "CEe ground-truth encoding embeddings",
             [
                 py,
@@ -184,24 +158,32 @@ def main() -> None:
                 *plot_flag,
             ],
         )
-    run_step(
-        "LM-head perceptual RSA",
-        [
-            py,
-            str(script_dir / "lm_head_perceptual_rsa.py"),
-            "--ground-truth",
-            str(ground_truth),
-            "--dataset-root",
-            str(dataset_root),
-            "--output-dir",
-            str(output),
-            "--permutation-rounds",
-            str(args.permutation_rounds),
-            "--seed",
-            str(args.seed),
-            *plot_flag,
-        ],
-    )
+        run_step(
+            "CEg generation-side embeddings",
+            [
+                py,
+                str(script_dir / "generation_context_embedding_analysis.py"),
+                "--ground-truth",
+                str(ground_truth),
+                "--dataset-root",
+                str(dataset_root),
+                "--output-dir",
+                str(output),
+                "--model-id",
+                args.model_id,
+                "--device",
+                args.device,
+                "--dtype",
+                args.dtype,
+                "--layer-indices",
+                args.layer_indices,
+                "--permutation-rounds",
+                str(args.permutation_rounds),
+                "--seed",
+                str(args.seed),
+                *plot_flag,
+            ],
+        )
     run_step(
         "similarity analysis",
         [
@@ -255,9 +237,8 @@ def main() -> None:
         "text_embeddings": maybe_load(output / "embeddings" / "text_embedding_summary.json"),
         "text_cielab_alignment": maybe_load(output / "rdm" / "text_cielab_alignment_summary.json"),
         "query_embeddings": maybe_load(output / "embeddings" / "query_embedding_summary.json"),
-        "answer_position": maybe_load(output / "generation_side" / "answer_position_summary.json"),
         "cee_ground_truth": maybe_load(output / "encoding_side" / "cee_ground_truth_summary.json"),
-        "lm_head_cielab_alignment": maybe_load(output / "rdm" / "lm_head_cielab_alignment_summary.json"),
+        "ceg_generation_side": maybe_load(output / "ceg_generation_side" / "summary.json"),
         "similarity": maybe_load(output / "similarity" / "summary.json"),
         "relation": maybe_load(output / "relation" / "summary.json"),
         "negative_control": maybe_load(output / "negative_control" / "summary.json"),

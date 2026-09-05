@@ -1,6 +1,26 @@
 # LLaVA Structured Color Pipeline
 
-This is the new modular pipeline for the color representation thesis experiments. Old experiment entry scripts have been moved to `scripts/wip/`.
+This is the modular pipeline for the color representation thesis experiments.
+The current story line compares visual, textual, perceptual, query, encoding-side,
+and generation-side color representations.
+
+## Research Logic
+
+1. Compare image color embeddings, text color embeddings, and CIEDE2000 perceptual color geometry.
+2. Analyze query embeddings under two prompt conditions: `force_choice` and `no_color_list`.
+3. Analyze CEe: encoding-side contextual color-word embeddings using ground-truth color words.
+4. Analyze CEg: generation-side embeddings from actual model generation.
+5. Relate representation alignment metrics to color naming accuracy.
+
+## Main Representations
+
+- `image`: image-token embeddings from selected LLaVA layers.
+- `text`: context-averaged color-word embeddings from 30 text contexts.
+- `query_force_choice`: query embeddings when the prompt lists the 11 color choices.
+- `query_no_color_list`: query embeddings when the prompt asks for a basic color without listing choices.
+- `cee_ground_truth`: encoding-side color-word hidden states from prompts like `<image> The color of this image is blue`.
+- `ceg_decision`: hidden states used by the LM head to predict the generated color word.
+- `ceg_token_from_generate`: generated color-token hidden states from the original `generate()` pass, taken at the following generation step.
 
 ## Full Pipeline
 
@@ -15,10 +35,16 @@ python3 -B scripts/run_llava_structured_pipeline.py \
   --permutation-rounds 1000
 ```
 
-The full run evaluates two prompt conditions:
+The color naming step evaluates two prompt conditions:
 
 - `force_choice`: lists the 11 basic color names.
 - `no_color_list`: asks for one basic color name without listing candidates.
+
+The CEg step uses this prompt by default:
+
+```text
+What color is this image? Answer with a short sentence in this exact format: The color is <color>.
+```
 
 ## Independent Steps
 
@@ -39,7 +65,7 @@ python3 -B scripts/image_embedding_extraction.py \
   --output-dir experiments/llava_structured_alignment
 ```
 
-Extract text color-word embeddings:
+Extract context-averaged text color-word embeddings:
 
 ```bash
 python3 -B scripts/text_embedding_extraction.py \
@@ -56,15 +82,7 @@ python3 -B scripts/text_perceptual_rsa.py \
   --permutation-rounds 1000
 ```
 
-Key outputs:
-
-- `rdm/text_cielab_alignment.csv`
-- `rdm/text_cielab_alignment_summary.json`
-- `plots/text_cielab_rsa_spearman.png`
-- `plots/text_cielab_rsa_kendall.png`
-- `plots/text_cielab_rsa_pearson.png`
-
-Materialize query embeddings:
+Extract query embeddings:
 
 ```bash
 python3 -B scripts/query_embedding_extraction.py \
@@ -73,10 +91,10 @@ python3 -B scripts/query_embedding_extraction.py \
   --output-dir experiments/llava_structured_alignment
 ```
 
-Extract and analyze answer-position hidden states before color-word generation:
+Extract and analyze CEe embeddings:
 
 ```bash
-python3 -B scripts/answer_position_embedding_analysis.py \
+python3 -B scripts/context_embedding_encoding_analysis.py \
   --ground-truth experiments/llava_structured_alignment/data/ground_truth.csv \
   --dataset-root experiments/llava_structured_alignment/data \
   --output-dir experiments/llava_structured_alignment \
@@ -85,19 +103,19 @@ python3 -B scripts/answer_position_embedding_analysis.py \
   --permutation-rounds 1000
 ```
 
-This step saves generation-side color representations and compares them with input-side text color embeddings, LM-head output color-token vectors, image embeddings, and CIEDE2000 perceptual color distances.
+Extract and analyze CEg embeddings:
 
-Key outputs:
+```bash
+python3 -B scripts/generation_context_embedding_analysis.py \
+  --ground-truth experiments/llava_structured_alignment/data/ground_truth.csv \
+  --dataset-root experiments/llava_structured_alignment/data \
+  --output-dir experiments/llava_structured_alignment \
+  --model-id llava-hf/llava-1.5-7b-hf \
+  --layer-indices 0,1,8,16,24,32 \
+  --permutation-rounds 1000
+```
 
-- `embeddings/answer_position_embeddings_force_choice.npz`
-- `embeddings/answer_position_embeddings_no_color_list.npz`
-- `embeddings/lm_head_color_vectors.npy`
-- `similarity/answer_force_choice_layerwise.csv`
-- `similarity/answer_lm_head_force_choice_layerwise.csv`
-- `generation_side/answer_image_alignment.csv`
-- `generation_side/answer_cielab_alignment.csv`
-
-Run similarity/RSA/CKA/probe analyses:
+Run image/query vs text similarity, RSA, CKA, and probe analyses:
 
 ```bash
 python3 -B scripts/similarity_analysis.py \
@@ -122,6 +140,51 @@ python3 -B scripts/negative_control.py \
   --output-dir experiments/llava_structured_alignment
 ```
 
+
+## Randomness / Sampling Robustness Plots
+
+After running the full pipeline with multiple random seeds, use this script to plot each seed as a thin line and the across-seed mean +/- SD as a thick line with a shaded band.
+
+Example with three runs:
+
+```bash
+python3 -B scripts/plot_randomness_summary.py \
+  --run-dirs \
+    experiments/llava_seed1 \
+    experiments/llava_seed2 \
+    experiments/llava_seed3 \
+  --run-labels seed1,seed2,seed3 \
+  --output-dir experiments/randomness_plots
+```
+
+By default, the script tries the main robustness plots, including:
+
+- image vs CIEDE2000 centroid/sample RSA
+- query no-color-list vs text color RSA
+- CEe vs text color RSA
+- CEg-decision vs CIEDE2000/image centroid RSA
+- CEg-token-from-generate vs CIEDE2000/image centroid RSA
+
+To plot one specific preset:
+
+```bash
+python3 -B scripts/plot_randomness_summary.py \
+  --run-dirs experiments/llava_seed1 experiments/llava_seed2 experiments/llava_seed3 \
+  --run-labels seed1,seed2,seed3 \
+  --spec image_no_color_list_cielab_centroid_rsa \
+  --output-dir experiments/randomness_plots
+```
+
+To plot a custom layer-wise CSV metric:
+
+```bash
+python3 -B scripts/plot_randomness_summary.py \
+  --run-dirs experiments/llava_seed1 experiments/llava_seed2 experiments/llava_seed3 \
+  --relative-csv similarity/query_no_color_list_layerwise.csv \
+  --y-column linear_cka \
+  --name query_no_color_list_linear_cka_randomness
+```
+
 ## Output Structure
 
 Main output directory:
@@ -133,14 +196,14 @@ experiments/llava_structured_alignment/
 Important subdirectories:
 
 - `data/`: selected RGB samples, ground truth CSV, generated PNG patches.
-- `color_naming/`: VLM responses, class metrics, confusion matrices.
-- `embeddings/`: image, query, and text embeddings as `.npz` files.
+- `color_naming/`: VLM responses, class metrics, and confusion matrices.
+- `embeddings/`: image, query, text, and CEe embeddings.
 - `rdm/`: model RDMs and CIEDE2000 RDMs.
-- `similarity/`: layer-wise cosine, pair margin, RSA, CKA, and Procrustes results.
+- `similarity/`: layer-wise cosine, pair margin, RSA, CKA, Procrustes, and probe summaries for image/query/CEe.
 - `linear_probe/`: linear color probe results by layer.
-- `relation/`: correlations and regressions linking representation metrics to final color naming behavior.
-- `generation_side/`: answer-position hidden-state analyses before color-word generation.
+- `encoding_side/`: CEe prompts and summary.
+- `ceg_generation_side/`: CEg predictions, embeddings, CIELAB/image/text comparisons, and plots.
+- `relation/`: correlations and regressions linking representation metrics to color naming behavior.
 - `negative_control/`: shuffled/permuted label controls.
 - `plots/`: confusion matrices, error cases, and layer-wise plots.
 - `summary.json`: final pipeline summary.
-

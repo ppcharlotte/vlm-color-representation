@@ -15,9 +15,9 @@ from pathlib import Path
 
 import numpy as np
 
-from answer_position_embedding_analysis import (
+from representation_analysis_utils import (
     analyze_against_color_prototypes,
-    analyze_against_image,
+    analyze_against_embedding_target,
     load_or_compute_cielab,
 )
 from structured_color_utils import (
@@ -286,7 +286,7 @@ def main() -> None:
 
     image_layers = cee_image_layers if cee_image_layers is not None else load_image_layers(output, "no_color_list")
     if image_layers is not None:
-        image_rows = analyze_against_image("cee_ground_truth", cee_layers, image_layers, layer_indices, labels, output, args)
+        image_rows = analyze_against_embedding_target("cee_ground_truth", cee_layers, image_layers, layer_indices, labels, output, args)
         image_path = encoding_dir / "cee_image_alignment.csv"
         write_csv(
             image_path,
