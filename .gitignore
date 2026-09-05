@@ -55,4 +55,11 @@ huggingface_cache/
 # Build/package artifacts
 build/
 dist/
-*.egg-info/
+*.egg-info/baseline_color.csv
+data/colorsurvey_basic_answers.csv
+data/colorsurvey_rgb_aggregated_high_agreement.csv
+data/colorsurvey_rgb_aggregated.csv
+baseline_color.csv
+data/colorsurvey_basic_answers.csv
+data/colorsurvey_rgb_aggregated_high_agreement.csv
+data/colorsurvey_rgb_aggregated.csv

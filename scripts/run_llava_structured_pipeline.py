@@ -158,6 +158,32 @@ def main() -> None:
                 *plot_flag,
             ],
         )
+        run_step(
+            "CEe ground-truth encoding embeddings",
+            [
+                py,
+                str(script_dir / "context_embedding_encoding_analysis.py"),
+                "--ground-truth",
+                str(ground_truth),
+                "--dataset-root",
+                str(dataset_root),
+                "--output-dir",
+                str(output),
+                "--model-id",
+                args.model_id,
+                "--device",
+                args.device,
+                "--dtype",
+                args.dtype,
+                "--layer-indices",
+                args.layer_indices,
+                "--permutation-rounds",
+                str(args.permutation_rounds),
+                "--seed",
+                str(args.seed),
+                *plot_flag,
+            ],
+        )
     run_step(
         "LM-head perceptual RSA",
         [
@@ -230,6 +256,7 @@ def main() -> None:
         "text_cielab_alignment": maybe_load(output / "rdm" / "text_cielab_alignment_summary.json"),
         "query_embeddings": maybe_load(output / "embeddings" / "query_embedding_summary.json"),
         "answer_position": maybe_load(output / "generation_side" / "answer_position_summary.json"),
+        "cee_ground_truth": maybe_load(output / "encoding_side" / "cee_ground_truth_summary.json"),
         "lm_head_cielab_alignment": maybe_load(output / "rdm" / "lm_head_cielab_alignment_summary.json"),
         "similarity": maybe_load(output / "similarity" / "summary.json"),
         "relation": maybe_load(output / "relation" / "summary.json"),
