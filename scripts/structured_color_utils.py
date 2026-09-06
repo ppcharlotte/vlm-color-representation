@@ -4,13 +4,15 @@
 from __future__ import annotations
 
 import csv
+import inspect
 import json
 import math
 import random
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 import numpy as np
 from PIL import Image
@@ -202,30 +204,182 @@ def choose_torch_dtype(dtype_name: str):
     return "auto"
 
 
+def _dtype_kwarg_name(transformers_module) -> str:
+    try:
+        params = inspect.signature(transformers_module.PreTrainedModel.from_pretrained).parameters
+        if "dtype" in params:
+            return "dtype"
+    except Exception:
+        pass
+    return "torch_dtype"
+
+
+def _model_dtype(model):
+    try:
+        return next(model.parameters()).dtype
+    except StopIteration:
+        return None
+
+
+def _move_inputs(inputs, device, dtype):
+    moved = {}
+    for key, value in dict(inputs).items():
+        if not hasattr(value, "to"):
+            moved[key] = value
+            continue
+        is_float = getattr(value, "is_floating_point", lambda: False)()
+        moved[key] = value.to(device=device, dtype=dtype) if is_float and dtype is not None else value.to(device=device)
+    return moved
+
+
+def _patch_rope_default(torch_module) -> None:
+    try:
+        from transformers import modeling_rope_utils
+    except Exception:
+        return
+    rope_fns = getattr(modeling_rope_utils, "ROPE_INIT_FUNCTIONS", None)
+    if not isinstance(rope_fns, dict) or "default" in rope_fns:
+        return
+    builtin = getattr(modeling_rope_utils, "_compute_default_rope_parameters", None)
+    if builtin is not None:
+        rope_fns["default"] = builtin
+        return
+
+    def compute_default_rope_parameters(config: Any, device=None, seq_len=None, layer_type=None, **kwargs):
+        rope_parameters = getattr(config, "rope_parameters", None) or {}
+        if layer_type is not None and isinstance(rope_parameters.get(layer_type), dict):
+            rope_parameters = rope_parameters[layer_type]
+        base = rope_parameters.get("rope_theta", getattr(config, "rope_theta", 10000.0))
+        partial_rotary_factor = rope_parameters.get("partial_rotary_factor", getattr(config, "partial_rotary_factor", 1.0))
+        head_dim = getattr(config, "head_dim", None) or config.hidden_size // config.num_attention_heads
+        dim = int(head_dim * partial_rotary_factor)
+        inv_freq = 1.0 / (base ** (torch_module.arange(0, dim, 2, dtype=torch_module.float) / dim))
+        return inv_freq.to(device) if device is not None else inv_freq, 1.0
+
+    rope_fns["default"] = compute_default_rope_parameters
+
+
+def _patch_config_token_ids(config, pad_token_id: int | None) -> None:
+    if pad_token_id is None:
+        return
+    config.pad_token_id = pad_token_id
+    text_config = getattr(config, "text_config", None)
+    if text_config is not None:
+        text_config.pad_token_id = pad_token_id
+
+
+def _patch_config_attention(config, attn_implementation: str) -> None:
+    for target in [config, getattr(config, "text_config", None), getattr(config, "vision_config", None)]:
+        if target is None:
+            continue
+        try:
+            target._attn_implementation = attn_implementation
+        except Exception:
+            pass
+        target._attn_implementation_internal = attn_implementation
+
+
+def _resolve_pad_token_id(transformers_module, model_id: str, processor) -> int | None:
+    try:
+        generation_config = transformers_module.GenerationConfig.from_pretrained(model_id, trust_remote_code=True)
+        if generation_config.pad_token_id is not None:
+            return int(generation_config.pad_token_id)
+    except Exception:
+        pass
+    tokenizer = getattr(processor, "tokenizer", processor)
+    for attr in ("pad_token_id", "eos_token_id"):
+        token_id = getattr(tokenizer, attr, None)
+        if token_id is not None:
+            return int(token_id)
+    return None
+
+
+def _dynamic_model_class(model_id: str, config):
+    auto_map = getattr(config, "auto_map", {}) or {}
+    class_ref = None
+    for key in ("AutoModelForImageTextToText", "AutoModelForVision2Seq", "AutoModelForCausalLM", "AutoModel"):
+        if auto_map.get(key):
+            class_ref = auto_map[key]
+            break
+    if not class_ref:
+        return None
+    try:
+        from transformers.dynamic_module_utils import get_class_from_dynamic_module
+
+        return get_class_from_dynamic_module(class_ref, model_id)
+    except Exception:
+        return None
+
+
+def _patch_remote_attention_defaults(model_cls, attn_implementation: str) -> None:
+    if model_cls is None:
+        return
+    module = sys.modules.get(model_cls.__module__)
+    if module is None:
+        return
+    aliases = {
+        "eager": ("eager",),
+        "sdpa": ("sdpa",),
+        "flash_attention_2": ("flash_attention_2", "flash_attn_2", "flash"),
+    }.get(attn_implementation, (attn_implementation,))
+    for name, value in vars(module).items():
+        if not name.endswith("_ATTENTION_CLASSES") or not isinstance(value, dict):
+            continue
+        target = next((value[key] for key in aliases if key in value), None)
+        if target is not None:
+            value["default"] = target
+
+
 class LlavaHelper:
     def __init__(self, model_id: str, device: str = "auto", dtype: str = "auto", seed: int = 42) -> None:
         try:
             import torch
-            from transformers import AutoProcessor, LlavaForConditionalGeneration
+            import transformers
+            from transformers import AutoConfig, AutoModelForCausalLM, AutoProcessor, LlavaForConditionalGeneration
         except Exception as exc:
             raise RuntimeError("Install torch, torchvision, transformers, accelerate, and Pillow for LLaVA support.") from exc
 
         self.torch = torch
+        self.transformers = transformers
+        self.model_id = model_id
         self.device = choose_torch_device(device)
         torch.manual_seed(seed)
         model_dtype = choose_torch_dtype(dtype)
-        kwargs = {"torch_dtype": model_dtype} if model_dtype != "auto" else {"torch_dtype": "auto"}
-        if self.device.type == "cuda":
-            kwargs["device_map"] = "auto"
-        self.processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
-        self.model = LlavaForConditionalGeneration.from_pretrained(model_id, trust_remote_code=True, **kwargs)
+        _patch_rope_default(torch)
+        config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
+        model_type = str(getattr(config, "model_type", "")).lower()
+        self.is_onevision = "onevision" in model_type or "onevision" in model_id.lower()
+
+        if self.is_onevision:
+            self.processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+            if hasattr(self.processor, "tokenizer") and hasattr(self.processor.tokenizer, "padding_side"):
+                self.processor.tokenizer.padding_side = "left"
+            config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
+            _patch_config_token_ids(config, _resolve_pad_token_id(transformers, model_id, self.processor))
+            _patch_config_attention(config, "sdpa")
+            dynamic_cls = _dynamic_model_class(model_id, config)
+            _patch_remote_attention_defaults(dynamic_cls, "sdpa")
+            load_cls = dynamic_cls or AutoModelForCausalLM
+            dtype_arg = model_dtype if model_dtype != "auto" else "auto"
+            kwargs = {"config": config, "trust_remote_code": True, "attn_implementation": "sdpa", _dtype_kwarg_name(transformers): dtype_arg}
+            if self.device.type == "cuda":
+                kwargs["device_map"] = "auto"
+            self.model = load_cls.from_pretrained(model_id, **kwargs)
+        else:
+            kwargs = {"torch_dtype": model_dtype} if model_dtype != "auto" else {"torch_dtype": "auto"}
+            if self.device.type == "cuda":
+                kwargs["device_map"] = "auto"
+            self.processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+            self.model = LlavaForConditionalGeneration.from_pretrained(model_id, trust_remote_code=True, **kwargs)
+
         if self.device.type != "cuda":
             self.model.to(self.device)
         self.model.eval()
+        self.model_dtype = _model_dtype(self.model)
         self.vision_feature_layer = getattr(self.model.config, "vision_feature_layer", -2)
         self.vision_feature_select_strategy = getattr(self.model.config, "vision_feature_select_strategy", "default")
-        self.vision_tower = self._find_vision_tower()
-        self.projector = self._find_projector()
+        self.vision_tower = None if self.is_onevision else self._find_vision_tower()
+        self.projector = None if self.is_onevision else self._find_projector()
 
     def _resolve_path(self, root, dotted_path: str):
         current = root
@@ -268,14 +422,36 @@ class LlavaHelper:
         return getattr(self.processor, "tokenizer", self.processor)
 
     def image_token_id(self) -> int:
-        token_id = getattr(self.model.config, "image_token_index", None)
+        token_id = getattr(self.model.config, "image_token_id", None)
+        if token_id is None:
+            token_id = getattr(self.model.config, "image_token_index", None)
         if token_id is not None:
             return int(token_id)
         tokenizer = self.tokenizer()
-        token_id = tokenizer.convert_tokens_to_ids("<image>")
-        if token_id is None or token_id == tokenizer.unk_token_id:
-            raise ValueError("Could not resolve <image> token id")
-        return int(token_id)
+        for token in ("<image>", "<|image_pad|>"):
+            token_id = tokenizer.convert_tokens_to_ids(token)
+            if token_id is not None and token_id != tokenizer.unk_token_id:
+                return int(token_id)
+        raise ValueError("Could not resolve image token id")
+
+    def target_device(self):
+        return getattr(self.model, "device", self.device)
+
+    def prepare_inputs(self, text: str, image: Image.Image):
+        inputs = self.processor(text=[text], images=[image], padding=True, return_tensors="pt")
+        return _move_inputs(inputs, self.target_device(), self.model_dtype)
+
+    def image_token_mask(self, input_ids):
+        tokenizer = self.tokenizer()
+        token_ids = {self.image_token_id()}
+        for token in ("<image>", "<|image_pad|>"):
+            token_id = tokenizer.convert_tokens_to_ids(token)
+            if token_id is not None and token_id != getattr(tokenizer, "unk_token_id", None):
+                token_ids.add(int(token_id))
+        mask = self.torch.zeros_like(input_ids[0], dtype=self.torch.bool)
+        for token_id in token_ids:
+            mask |= input_ids[0] == token_id
+        return mask
 
     def chat_prompt(self, prompt: str) -> str:
         messages = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": prompt}]}]
@@ -289,8 +465,7 @@ class LlavaHelper:
     def generate(self, image_path: str, prompt: str, max_new_tokens: int = 8, temperature: float = 0.0) -> str:
         image = Image.open(image_path).convert("RGB")
         text = self.chat_prompt(prompt)
-        inputs = self.processor(text=text, images=image, return_tensors="pt")
-        inputs = {key: value.to(self.device) for key, value in inputs.items()}
+        inputs = self.prepare_inputs(text, image)
         do_sample = temperature > 0
         with self.torch.no_grad():
             generated_ids = self.model.generate(
@@ -347,6 +522,9 @@ class LlavaHelper:
         return inputs_embeds, attention_mask, query_mask, (pos, pos + n_image)
 
     def layerwise_image_and_query_embeddings(self, image_paths: list[str], prompt: str, layer_indices: list[int], pooling: str = "mean") -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        if self.is_onevision:
+            return self._onevision_layerwise_image_and_query_embeddings(image_paths, prompt, layer_indices, pooling)
+
         language_model = self.language_model()
         image_layers = [[] for _ in layer_indices]
         query_layers = [[] for _ in layer_indices]
@@ -380,6 +558,98 @@ class LlavaHelper:
             np.stack([np.vstack(v) for v in query_layers]).astype(np.float32),
         )
 
+
+    def _onevision_layerwise_image_and_query_embeddings(self, image_paths: list[str], prompt: str, layer_indices: list[int], pooling: str = "mean") -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        image_layers = [[] for _ in layer_indices]
+        query_layers = [[] for _ in layer_indices]
+        base_image = []
+        with self.torch.no_grad():
+            for image_path in image_paths:
+                image = Image.open(image_path).convert("RGB")
+                inputs = self.prepare_inputs(self.chat_prompt(prompt), image)
+                outputs = self.model(**inputs, output_hidden_states=True, use_cache=False, return_dict=True)
+                input_ids = inputs["input_ids"]
+                attention = inputs.get("attention_mask")
+                image_mask = self.image_token_mask(input_ids)
+                if not bool(image_mask.any().item()):
+                    raise ValueError(f"Could not locate image tokens for {image_path}")
+                query_mask = ~image_mask
+                if attention is not None:
+                    query_mask &= attention[0].to(dtype=self.torch.bool)
+                for token_id in set(getattr(self.tokenizer(), "all_special_ids", []) or []):
+                    query_mask &= input_ids[0] != int(token_id)
+                if not bool(query_mask.any().item()):
+                    query_mask = ~image_mask
+                for out_idx, layer_idx in enumerate(layer_indices):
+                    hidden = outputs.hidden_states[layer_idx][0]
+                    image_tokens = hidden[image_mask]
+                    query_tokens = hidden[query_mask]
+                    image_pooled = image_tokens.mean(dim=0) if pooling == "mean" else image_tokens[0]
+                    query_pooled = query_tokens.mean(dim=0) if query_tokens.shape[0] else hidden.mean(dim=0)
+                    image_layers[out_idx].append(image_pooled.detach().float().cpu().numpy())
+                    query_layers[out_idx].append(query_pooled.detach().float().cpu().numpy())
+                first_hidden = outputs.hidden_states[0][0]
+                first_image_tokens = first_hidden[image_mask]
+                first_image = first_image_tokens.mean(dim=0) if pooling == "mean" else first_image_tokens[0]
+                base_image.append(first_image.detach().float().cpu().numpy())
+        base_image = np.asarray(base_image, dtype=np.float32)
+        return (
+            base_image,
+            base_image.copy(),
+            np.stack([np.vstack(v) for v in image_layers]).astype(np.float32),
+            np.stack([np.vstack(v) for v in query_layers]).astype(np.float32),
+        )
+
+    def context_inputs_with_color_mask(self, image_path: str, statement: str, color: str):
+        if self.is_onevision:
+            image = Image.open(image_path).convert("RGB")
+            text = self.chat_prompt(statement)
+            inputs = self.prepare_inputs(text, image)
+            color_mask = self.color_token_mask(inputs["input_ids"], color, text=None, offsets=None).to(self.target_device())
+            image_mask = self.image_token_mask(inputs["input_ids"]).to(self.target_device())
+            if not bool(image_mask.any().item()):
+                raise ValueError(f"Could not locate image tokens for {image_path}")
+            return self.model, inputs, color_mask, image_mask, text
+
+        embedding_layer = self.embedding_layer()
+        tokenizer = self.tokenizer()
+        image_token_id = self.image_token_id()
+        _pre, projected = self.vision_features([image_path])
+        image_features_t = self.torch.from_numpy(projected).to(self.device, dtype=embedding_layer.weight.dtype)
+
+        text = self.chat_prompt(statement)
+        try:
+            encoded = tokenizer(text, return_tensors="pt", return_offsets_mapping=True)
+            offsets = encoded.pop("offset_mapping", None)
+        except Exception:
+            encoded = tokenizer(text, return_tensors="pt")
+            offsets = None
+
+        input_ids = encoded["input_ids"].to(self.device)
+        positions = (input_ids[0] == image_token_id).nonzero(as_tuple=False).flatten()
+        if len(positions) != 1:
+            raise ValueError(f"Prompt must contain exactly one image token; found {len(positions)}")
+        pos = int(positions[0].item())
+
+        original_color_mask = self.color_token_mask(input_ids, color, text=text, offsets=offsets).to(self.device)
+        token_embeds = embedding_layer(input_ids)
+        inputs_embeds = self.torch.cat([token_embeds[:, :pos, :], image_features_t, token_embeds[:, pos + 1 :, :]], dim=1)
+        attention_mask = self.torch.ones(inputs_embeds.shape[:2], dtype=self.torch.long, device=self.device)
+
+        n_image = image_features_t.shape[1]
+        expanded_color_mask = self.torch.zeros(inputs_embeds.shape[1], dtype=self.torch.bool, device=self.device)
+        for original_idx in original_color_mask.nonzero(as_tuple=False).flatten().tolist():
+            original_idx = int(original_idx)
+            if original_idx == pos:
+                continue
+            expanded_idx = original_idx if original_idx < pos else original_idx + n_image - 1
+            expanded_color_mask[expanded_idx] = True
+        if not bool(expanded_color_mask.any().item()):
+            raise ValueError(f"Could not map color token '{color}' to expanded prompt: {text}")
+        image_mask = self.torch.zeros(inputs_embeds.shape[1], dtype=self.torch.bool, device=self.device)
+        image_mask[pos : pos + n_image] = True
+        return self.language_model(), {"inputs_embeds": inputs_embeds, "attention_mask": attention_mask}, expanded_color_mask, image_mask, text
+
     def color_token_mask(self, input_ids, color: str, text: str | None = None, offsets=None):
         tokenizer = self.tokenizer()
         sequence = input_ids[0]
@@ -411,7 +681,7 @@ class LlavaHelper:
         raise ValueError(f"Could not locate color token '{color}' in tokenized text: {text or tokenizer.decode(sequence)}")
 
     def layerwise_text_embeddings(self, colors: list[str], contexts: list[str], layer_indices: list[int]) -> tuple[np.ndarray, np.ndarray]:
-        language_model = self.language_model()
+        language_model = None if self.is_onevision else self.language_model()
         tokenizer = self.tokenizer()
         aggregated = [[] for _ in layer_indices]
         context_specific = [[[] for _ in colors] for _ in layer_indices]
@@ -426,14 +696,18 @@ class LlavaHelper:
                     except Exception:
                         encoded = tokenizer(text, return_tensors="pt")
                         offsets = None
-                    input_ids = encoded["input_ids"].to(self.device)
-                    attention_mask = encoded.get("attention_mask")
-                    attention_mask = attention_mask.to(self.device) if attention_mask is not None else None
-                    color_mask = self.color_token_mask(input_ids, color, text=text, offsets=offsets)
-                    outputs = language_model(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True, use_cache=False, return_dict=True)
+                    inputs = _move_inputs(encoded, self.target_device(), self.model_dtype)
+                    input_ids = inputs["input_ids"]
+                    attention_mask = inputs.get("attention_mask")
+                    color_mask = self.color_token_mask(input_ids, color, text=text, offsets=offsets).to(input_ids.device)
+                    if self.is_onevision:
+                        outputs = self.model(**inputs, output_hidden_states=True, use_cache=False, return_dict=True)
+                    else:
+                        outputs = language_model(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True, use_cache=False, return_dict=True)
                     for out_idx, layer_idx in enumerate(layer_indices):
                         hidden = outputs.hidden_states[layer_idx][0]
-                        selected = hidden[color_mask]
+                        active_color_mask = color_mask.to(device=hidden.device, dtype=self.torch.bool)
+                        selected = hidden[active_color_mask]
                         vector = selected.mean(dim=0)
                         vector = vector / vector.norm(dim=-1, keepdim=True)
                         by_layer[out_idx].append(vector)
@@ -564,9 +838,19 @@ def centroids(embeddings: np.ndarray, labels: list[str], colors: list[str] = BAS
     return np.vstack([np.asarray(embeddings)[label_indices == idx].mean(axis=0) for idx in range(len(colors))])
 
 
+def finite_pair_rows(a: np.ndarray, b: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+    valid = np.isfinite(a).all(axis=1) & np.isfinite(b).all(axis=1)
+    return a[valid], b[valid]
+
+
 def linear_cka(a: np.ndarray, b: np.ndarray) -> float:
-    a = np.asarray(a, dtype=float) - np.asarray(a, dtype=float).mean(axis=0, keepdims=True)
-    b = np.asarray(b, dtype=float) - np.asarray(b, dtype=float).mean(axis=0, keepdims=True)
+    a, b = finite_pair_rows(a, b)
+    if a.shape[0] < 2 or b.shape[0] < 2:
+        return float("nan")
+    a = a - a.mean(axis=0, keepdims=True)
+    b = b - b.mean(axis=0, keepdims=True)
     ga = a @ a.T
     gb = b @ b.T
     denom = math.sqrt(float(np.sum(ga * ga) * np.sum(gb * gb)))
@@ -574,15 +858,19 @@ def linear_cka(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def procrustes_error(source: np.ndarray, target: np.ndarray) -> float:
+    source, target = finite_pair_rows(source, target)
+    if source.shape[0] < 2 or target.shape[0] < 2:
+        return float("nan")
     denom = np.linalg.norm(target)
     if not denom:
         return float("nan")
-    source = np.asarray(source, dtype=float)
-    target = np.asarray(target, dtype=float)
-    u_source, s_source, _ = np.linalg.svd(source, full_matrices=False)
-    u_target, s_target, _ = np.linalg.svd(target, full_matrices=False)
-    small = (s_source[:, None] * (u_source.T @ u_target)) * s_target[None, :]
-    singular_values = np.linalg.svd(small, compute_uv=False)
+    try:
+        u_source, s_source, _ = np.linalg.svd(source, full_matrices=False)
+        u_target, s_target, _ = np.linalg.svd(target, full_matrices=False)
+        small = (s_source[:, None] * (u_source.T @ u_target)) * s_target[None, :]
+        singular_values = np.linalg.svd(small, compute_uv=False)
+    except np.linalg.LinAlgError:
+        return float("nan")
     residual_sq = np.linalg.norm(source) ** 2 + np.linalg.norm(target) ** 2 - 2.0 * float(np.sum(singular_values))
     return float(math.sqrt(max(residual_sq, 0.0)) / denom)
 

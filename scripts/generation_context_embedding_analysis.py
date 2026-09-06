@@ -101,8 +101,7 @@ def generated_color_span(tokenizer, generated_ids: list[int], color: str) -> tup
 def generate_one(helper: LlavaHelper, image_path: str, prompt: str, max_new_tokens: int, temperature: float):
     image = Image.open(image_path).convert("RGB")
     text = helper.chat_prompt(prompt)
-    inputs = helper.processor(text=text, images=image, return_tensors="pt")
-    inputs = {key: value.to(helper.device) for key, value in inputs.items()}
+    inputs = helper.prepare_inputs(text, image)
     do_sample = temperature > 0
     with helper.torch.no_grad():
         outputs = helper.model.generate(

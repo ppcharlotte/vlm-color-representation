@@ -46,6 +46,64 @@ The CEg step uses this prompt by default:
 What color is this image? Answer with a short sentence in this exact format: The color is <color>.
 ```
 
+## OneVision Minimal Run
+
+The shared `LlavaHelper` now auto-detects `lmms-lab/LLaVA-OneVision-1.5-*` models and uses the remote `AutoModelForCausalLM` loader with Qwen2VL-style processor inputs. For OneVision, start with a small run before launching the full pipeline:
+
+```bash
+python3 -B scripts/color_naming.py \
+  --input-csv data/colorsurvey_rgb_aggregated_new.csv \
+  --output-dir experiments/onevision_minimal \
+  --model-id lmms-lab/LLaVA-OneVision-1.5-8B-Instruct \
+  --device cuda \
+  --dtype bfloat16 \
+  --samples-per-color 2
+
+python3 -B scripts/image_embedding_extraction.py \
+  --ground-truth experiments/onevision_minimal/data/ground_truth.csv \
+  --dataset-root experiments/onevision_minimal/data \
+  --output-dir experiments/onevision_minimal \
+  --model-id lmms-lab/LLaVA-OneVision-1.5-8B-Instruct \
+  --device cuda \
+  --dtype bfloat16 \
+  --layer-indices 0,1,9,18,27,36 \
+  --permutation-rounds 100
+
+python3 -B scripts/text_embedding_extraction.py \
+  --output-dir experiments/onevision_minimal \
+  --model-id lmms-lab/LLaVA-OneVision-1.5-8B-Instruct \
+  --device cuda \
+  --dtype bfloat16 \
+  --layer-indices 0,1,9,18,27,36
+
+python3 -B scripts/context_embedding_encoding_analysis.py \
+  --ground-truth experiments/onevision_minimal/data/ground_truth.csv \
+  --dataset-root experiments/onevision_minimal/data \
+  --output-dir experiments/onevision_minimal \
+  --model-id lmms-lab/LLaVA-OneVision-1.5-8B-Instruct \
+  --device cuda \
+  --dtype bfloat16 \
+  --layer-indices 0,1,9,18,27,36 \
+  --permutation-rounds 100
+
+python3 -B scripts/generation_context_embedding_analysis.py \
+  --ground-truth experiments/onevision_minimal/data/ground_truth.csv \
+  --dataset-root experiments/onevision_minimal/data \
+  --output-dir experiments/onevision_minimal \
+  --model-id lmms-lab/LLaVA-OneVision-1.5-8B-Instruct \
+  --device cuda \
+  --dtype bfloat16 \
+  --layer-indices 0,1,9,18,27,36 \
+  --permutation-rounds 100
+```
+
+Recommended OneVision layer sets:
+
+- smoke/debug: `0,1,9,18,27,36`
+- final comparison: `0,1,8,16,24,32,36`
+
+For OneVision, `pre_projector` and `post_projector` in `image_embeddings_*.npz` are compatibility placeholders copied from the layer-0 image-token representation. The real OneVision analysis target is `image_layer_embeddings`.
+
 ## Independent Steps
 
 Create color patches and run color naming:

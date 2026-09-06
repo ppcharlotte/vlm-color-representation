@@ -61,58 +61,20 @@ def parse_args() -> argparse.Namespace:
 
 
 def expanded_language_inputs_with_color_mask(helper: LlavaHelper, image_path: str, statement: str, color: str):
-    """Build image-expanded LLM inputs and locate the color word after expansion."""
-    embedding_layer = helper.embedding_layer()
-    tokenizer = helper.tokenizer()
-    image_token_id = helper.image_token_id()
-
-    _pre, projected = helper.vision_features([image_path])
-    image_features_t = helper.torch.from_numpy(projected).to(helper.device, dtype=embedding_layer.weight.dtype)
-
-    text = helper.chat_prompt(statement)
-    try:
-        encoded = tokenizer(text, return_tensors="pt", return_offsets_mapping=True)
-        offsets = encoded.pop("offset_mapping", None)
-    except Exception:
-        encoded = tokenizer(text, return_tensors="pt")
-        offsets = None
-
-    input_ids = encoded["input_ids"].to(helper.device)
-    positions = (input_ids[0] == image_token_id).nonzero(as_tuple=False).flatten()
-    if len(positions) != 1:
-        raise ValueError(f"Prompt must contain exactly one image token; found {len(positions)}")
-    pos = int(positions[0].item())
-
-    original_color_mask = helper.color_token_mask(input_ids, color, text=text, offsets=offsets).to(helper.device)
-    token_embeds = embedding_layer(input_ids)
-    inputs_embeds = helper.torch.cat([token_embeds[:, :pos, :], image_features_t, token_embeds[:, pos + 1 :, :]], dim=1)
-    attention_mask = helper.torch.ones(inputs_embeds.shape[:2], dtype=helper.torch.long, device=helper.device)
-
-    n_image = image_features_t.shape[1]
-    expanded_color_mask = helper.torch.zeros(inputs_embeds.shape[1], dtype=helper.torch.bool, device=helper.device)
-    for original_idx in original_color_mask.nonzero(as_tuple=False).flatten().tolist():
-        original_idx = int(original_idx)
-        if original_idx == pos:
-            continue
-        expanded_idx = original_idx if original_idx < pos else original_idx + n_image - 1
-        expanded_color_mask[expanded_idx] = True
-    if not bool(expanded_color_mask.any().item()):
-        raise ValueError(f"Could not map color token '{color}' to expanded prompt: {text}")
-    return inputs_embeds, attention_mask, expanded_color_mask, (pos, pos + n_image), text
+    """Build model inputs and locate color/image tokens for the active model family."""
+    return helper.context_inputs_with_color_mask(image_path, statement, color)
 
 
 def extract_cee_layers(helper: LlavaHelper, image_paths: list[str], labels: list[str], layer_indices: list[int], template: str) -> tuple[np.ndarray, np.ndarray, list[dict]]:
-    language_model = helper.language_model()
     layer_values = [[] for _ in layer_indices]
     image_layer_values = [[] for _ in layer_indices]
     prompt_rows = []
     with helper.torch.no_grad():
         for sample_idx, (image_path, color) in enumerate(zip(image_paths, labels)):
             statement = template.format(color=color)
-            inputs_embeds, attention_mask, color_mask, image_span, expanded_text = expanded_language_inputs_with_color_mask(helper, image_path, statement, color)
-            outputs = language_model(
-                inputs_embeds=inputs_embeds,
-                attention_mask=attention_mask,
+            model, model_inputs, color_mask, image_mask, expanded_text = expanded_language_inputs_with_color_mask(helper, image_path, statement, color)
+            outputs = model(
+                **model_inputs,
                 output_hidden_states=True,
                 use_cache=False,
                 return_dict=True,
@@ -120,6 +82,7 @@ def extract_cee_layers(helper: LlavaHelper, image_paths: list[str], labels: list
             for out_idx, layer_idx in enumerate(layer_indices):
                 hidden = outputs.hidden_states[layer_idx][0]
                 active_color_mask = color_mask.to(device=hidden.device, dtype=helper.torch.bool).flatten()
+                active_image_mask = image_mask.to(device=hidden.device, dtype=helper.torch.bool).flatten()
                 if active_color_mask.shape[0] != hidden.shape[0]:
                     raise ValueError(
                         f"Color-token mask length does not match hidden states for sample={sample_idx}, "
@@ -131,7 +94,7 @@ def extract_cee_layers(helper: LlavaHelper, image_paths: list[str], labels: list
                 vector = selected.mean(dim=0)
                 vector = vector / vector.norm(dim=-1, keepdim=True)
                 layer_values[out_idx].append(vector.detach().float().cpu().numpy())
-                image_tokens = hidden[image_span[0] : image_span[1]]
+                image_tokens = hidden[active_image_mask]
                 image_vector = image_tokens.mean(dim=0)
                 image_vector = image_vector / image_vector.norm(dim=-1, keepdim=True)
                 image_layer_values[out_idx].append(image_vector.detach().float().cpu().numpy())
