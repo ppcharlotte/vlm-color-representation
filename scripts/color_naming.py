@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter, defaultdict
 from pathlib import Path
 
 import numpy as np
@@ -45,7 +46,8 @@ def parse_args() -> argparse.Namespace:
 def run_condition(helper: LlavaHelper, dataset_rows: list[dict[str, str]], output_dir: Path, condition: str, prompt: str, args: argparse.Namespace) -> dict:
     rows = []
     for row in dataset_rows:
-        raw = helper.generate(row["absolute_image_path"], prompt, args.max_new_tokens, args.temperature)
+        generation = helper.generate_details(row["absolute_image_path"], prompt, args.max_new_tokens, args.temperature)
+        raw = generation["text"]
         normalized, parse_status = normalize_color_answer(raw)
         true_color = row["basic_color"]
         rows.append(
@@ -59,6 +61,11 @@ def run_condition(helper: LlavaHelper, dataset_rows: list[dict[str, str]], outpu
                 "b": row.get("b"),
                 "true_color": true_color,
                 "raw_response": raw,
+                "raw_response_with_special_tokens": generation["text_with_special_tokens"],
+                "generated_token_ids": generation["generated_token_ids"],
+                "input_token_count": generation["input_token_count"],
+                "sequence_token_count": generation["sequence_token_count"],
+                "output_token_count": generation["output_token_count"],
                 "normalized_pred_color": normalized or "",
                 "parse_status": parse_status,
                 "correct": int(normalized == true_color),
@@ -79,6 +86,11 @@ def run_condition(helper: LlavaHelper, dataset_rows: list[dict[str, str]], outpu
             "b",
             "true_color",
             "raw_response",
+            "raw_response_with_special_tokens",
+            "generated_token_ids",
+            "input_token_count",
+            "sequence_token_count",
+            "output_token_count",
             "normalized_pred_color",
             "parse_status",
             "correct",
@@ -132,6 +144,10 @@ def main() -> None:
     write_csv(data_dir / "selected_color_samples.csv", fieldnames, dataset.rows)
     write_csv(data_dir / "ground_truth.csv", fieldnames, dataset.rows)
 
+    selected_counts = Counter(row["basic_color"] for row in dataset.rows)
+    rule_counts = defaultdict(Counter)
+    for row in dataset.rows:
+        rule_counts[row["basic_color"]][row.get("selection_majority_rule", "unknown")] += 1
     summaries = {
         "input_csv": str(args.input_csv),
         "output_dir": str(output),
@@ -141,6 +157,9 @@ def main() -> None:
         "seed": args.seed,
         "n_samples": len(dataset.rows),
         "ground_truth_csv": str(data_dir / "ground_truth.csv"),
+        "majority_count_filter": "Use majority_count > 2 by default; if a color has fewer than 10 such samples, fall back to majority_count >= 2 for that color. For black, fill from majority_count == 2 when strict samples are fewer than samples_per_color.",
+        "selected_counts_by_color": {color: int(selected_counts[color]) for color in BASIC_COLORS},
+        "selection_rule_counts_by_color": {color: dict(rule_counts[color]) for color in BASIC_COLORS},
         "conditions": {},
     }
     if not args.skip_generation:

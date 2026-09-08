@@ -113,9 +113,10 @@ def generate_one(helper: LlavaHelper, image_path: str, prompt: str, max_new_toke
             return_dict_in_generate=True,
         )
     input_len = int(inputs["input_ids"].shape[1])
-    generated_ids = [int(x) for x in outputs.sequences[0, input_len:].detach().cpu().tolist()]
+    generated_sequence = outputs.sequences[:, input_len:] if outputs.sequences.shape[1] > input_len else outputs.sequences
+    generated_ids = [int(x) for x in generated_sequence[0].detach().cpu().tolist()]
     generated_text = helper.processor.batch_decode(
-        outputs.sequences[:, input_len:],
+        generated_sequence,
         skip_special_tokens=True,
         clean_up_tokenization_spaces=False,
     )[0].strip()

@@ -119,6 +119,10 @@ def labels_to_indices(labels: list[str], colors: list[str] = BASIC_COLORS) -> np
     return np.array([mapping[normalize_color(label)] for label in labels], dtype=int)
 
 
+def majority_count(row: dict[str, str]) -> int:
+    return int(float(row.get("majority_count") or 0))
+
+
 def sample_color_rows(input_csv: Path, samples_per_color: int, seed: int) -> list[dict[str, str]]:
     rows = read_csv_rows(input_csv)
     buckets: dict[str, list[dict[str, str]]] = {color: [] for color in BASIC_COLORS}
@@ -129,11 +133,24 @@ def sample_color_rows(input_csv: Path, samples_per_color: int, seed: int) -> lis
     rng = random.Random(seed)
     selected = []
     for color in BASIC_COLORS:
-        bucket = list(buckets[color])
-        rng.shuffle(bucket)
-        for row in bucket[:samples_per_color]:
+        strict = [row for row in buckets[color] if majority_count(row) > 2]
+        fallback = [row for row in buckets[color] if majority_count(row) == 2]
+        rng.shuffle(strict)
+        rng.shuffle(fallback)
+        if color == "black" and len(strict) < samples_per_color:
+            candidates = [(row, "majority_count_gt_2") for row in strict]
+            needed = samples_per_color - len(candidates)
+            candidates.extend((row, "black_fill_majority_count_eq_2") for row in fallback[:needed])
+        elif len(strict) >= 10:
+            candidates = [(row, "majority_count_gt_2") for row in strict[:samples_per_color]]
+        else:
+            relaxed = strict + fallback
+            rng.shuffle(relaxed)
+            candidates = [(row, "fallback_majority_count_ge_2") for row in relaxed[:samples_per_color]]
+        for row, rule in candidates:
             out = dict(row)
             out["basic_color"] = color
+            out["selection_majority_rule"] = rule
             selected.append(out)
     selected.sort(key=lambda row: (BASIC_COLORS.index(row["basic_color"]), int(row["r"]), int(row["g"]), int(row["b"])))
     for idx, row in enumerate(selected):
@@ -462,7 +479,7 @@ class LlavaHelper:
                 pass
         return f"USER: <image>\n{prompt}\nASSISTANT:"
 
-    def generate(self, image_path: str, prompt: str, max_new_tokens: int = 8, temperature: float = 0.0) -> str:
+    def generate_details(self, image_path: str, prompt: str, max_new_tokens: int = 8, temperature: float = 0.0) -> dict:
         image = Image.open(image_path).convert("RGB")
         text = self.chat_prompt(prompt)
         inputs = self.prepare_inputs(text, image)
@@ -474,9 +491,22 @@ class LlavaHelper:
                 do_sample=do_sample,
                 temperature=temperature if do_sample else None,
             )
-        input_len = inputs["input_ids"].shape[1]
-        output_ids = generated_ids[:, input_len:]
-        return self.processor.batch_decode(output_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0].strip()
+        input_len = int(inputs["input_ids"].shape[1])
+        sequence_len = int(generated_ids.shape[1])
+        output_ids = generated_ids[:, input_len:] if sequence_len > input_len else generated_ids
+        decoded = self.processor.batch_decode(output_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0].strip()
+        decoded_with_special = self.processor.batch_decode(output_ids, skip_special_tokens=False, clean_up_tokenization_spaces=False)[0]
+        return {
+            "text": decoded,
+            "text_with_special_tokens": decoded_with_special,
+            "input_token_count": input_len,
+            "sequence_token_count": sequence_len,
+            "output_token_count": int(output_ids.shape[1]),
+            "generated_token_ids": " ".join(str(int(x)) for x in output_ids[0].detach().cpu().tolist()),
+        }
+
+    def generate(self, image_path: str, prompt: str, max_new_tokens: int = 8, temperature: float = 0.0) -> str:
+        return self.generate_details(image_path, prompt, max_new_tokens, temperature)["text"]
 
     def pixel_values(self, image_paths: list[str]):
         images = [Image.open(path).convert("RGB") for path in image_paths]

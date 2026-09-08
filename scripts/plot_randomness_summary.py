@@ -15,67 +15,154 @@ from pathlib import Path
 
 import numpy as np
 
+def rsa_spec(relative_csv: str, y_column: str, title: str, filter_column: str = "", filter_value: str = "") -> dict:
+    spec = {
+        "relative_csv": relative_csv,
+        "x_column": "layer_index",
+        "y_column": y_column,
+        "ylabel": "Spearman r",
+        "title": title,
+    }
+    if filter_column:
+        spec["filter_column"] = filter_column
+        spec["filter_value"] = filter_value
+    return spec
+
+
 DEFAULT_SPECS = {
-    "image_no_color_list_cielab_centroid_rsa": {
-        "relative_csv": "rdm/image_cielab_alignment.csv",
-        "filter_column": "representation",
-        "filter_value": "image_no_color_list",
-        "x_column": "layer_index",
-        "y_column": "centroid_rsa_spearman",
-        "ylabel": "Spearman r",
-        "title": "Image vs CIEDE2000 Centroid RSA Across Random Seeds",
-    },
-    "image_no_color_list_cielab_sample_rsa": {
-        "relative_csv": "rdm/image_cielab_alignment.csv",
-        "filter_column": "representation",
-        "filter_value": "image_no_color_list",
-        "x_column": "layer_index",
-        "y_column": "sample_rsa_spearman",
-        "ylabel": "Spearman r",
-        "title": "Image vs CIEDE2000 Sample RSA Across Random Seeds",
-    },
-    "query_no_color_list_text_rsa": {
-        "relative_csv": "similarity/query_no_color_list_layerwise.csv",
-        "x_column": "layer_index",
-        "y_column": "rsa_spearman",
-        "ylabel": "Spearman r",
-        "title": "Query vs Text Color RSA Across Random Seeds",
-    },
-    "cee_text_rsa": {
-        "relative_csv": "similarity/cee_ground_truth_layerwise.csv",
-        "x_column": "layer_index",
-        "y_column": "rsa_spearman",
-        "ylabel": "Spearman r",
-        "title": "CEe vs Text Color RSA Across Random Seeds",
-    },
-    "ceg_decision_cielab_centroid_rsa": {
-        "relative_csv": "ceg_generation_side/rdm/ceg_decision_cielab_alignment.csv",
-        "x_column": "layer_index",
-        "y_column": "centroid_rsa_spearman",
-        "ylabel": "Spearman r",
-        "title": "CEg-decision vs CIEDE2000 Centroid RSA Across Random Seeds",
-    },
-    "ceg_token_from_generate_cielab_centroid_rsa": {
-        "relative_csv": "ceg_generation_side/rdm/ceg_token_from_generate_cielab_alignment.csv",
-        "x_column": "layer_index",
-        "y_column": "centroid_rsa_spearman",
-        "ylabel": "Spearman r",
-        "title": "CEg-token-from-generate vs CIEDE2000 Centroid RSA Across Random Seeds",
-    },
-    "ceg_decision_image_centroid_rsa": {
-        "relative_csv": "ceg_generation_side/rdm/ceg_decision_image_alignment.csv",
-        "x_column": "layer_index",
-        "y_column": "centroid_rsa_spearman",
-        "ylabel": "Spearman r",
-        "title": "CEg-decision vs Image Centroid RSA Across Random Seeds",
-    },
-    "ceg_token_from_generate_image_centroid_rsa": {
-        "relative_csv": "ceg_generation_side/rdm/ceg_token_from_generate_image_alignment.csv",
-        "x_column": "layer_index",
-        "y_column": "centroid_rsa_spearman",
-        "ylabel": "Spearman r",
-        "title": "CEg-token-from-generate vs Image Centroid RSA Across Random Seeds",
-    },
+    "image_force_choice_cielab_sample_rsa": rsa_spec(
+        "rdm/image_cielab_alignment.csv",
+        "sample_rsa_spearman",
+        "Image Force-choice vs CIEDE2000 Sample RSA Across Random Seeds",
+        "representation",
+        "image_force_choice",
+    ),
+    "image_force_choice_cielab_centroid_rsa": rsa_spec(
+        "rdm/image_cielab_alignment.csv",
+        "centroid_rsa_spearman",
+        "Image Force-choice vs CIEDE2000 Centroid RSA Across Random Seeds",
+        "representation",
+        "image_force_choice",
+    ),
+    "image_no_color_list_cielab_sample_rsa": rsa_spec(
+        "rdm/image_cielab_alignment.csv",
+        "sample_rsa_spearman",
+        "Image No-color-list vs CIEDE2000 Sample RSA Across Random Seeds",
+        "representation",
+        "image_no_color_list",
+    ),
+    "image_no_color_list_cielab_centroid_rsa": rsa_spec(
+        "rdm/image_cielab_alignment.csv",
+        "centroid_rsa_spearman",
+        "Image No-color-list vs CIEDE2000 Centroid RSA Across Random Seeds",
+        "representation",
+        "image_no_color_list",
+    ),
+    "image_force_choice_text_rsa": rsa_spec(
+        "similarity/image_force_choice_layerwise.csv",
+        "rsa_spearman",
+        "Image Force-choice vs Text Color RSA Across Random Seeds",
+    ),
+    "image_no_color_list_text_rsa": rsa_spec(
+        "similarity/image_no_color_list_layerwise.csv",
+        "rsa_spearman",
+        "Image No-color-list vs Text Color RSA Across Random Seeds",
+    ),
+    "query_force_choice_text_rsa": rsa_spec(
+        "similarity/query_force_choice_layerwise.csv",
+        "rsa_spearman",
+        "Query Force-choice vs Text Color RSA Across Random Seeds",
+    ),
+    "query_no_color_list_text_rsa": rsa_spec(
+        "similarity/query_no_color_list_layerwise.csv",
+        "rsa_spearman",
+        "Query No-color-list vs Text Color RSA Across Random Seeds",
+    ),
+    "cee_text_rsa": rsa_spec(
+        "similarity/cee_ground_truth_layerwise.csv",
+        "rsa_spearman",
+        "CEe vs Text Color RSA Across Random Seeds",
+    ),
+    "cee_cielab_sample_rsa": rsa_spec(
+        "encoding_side/cee_cielab_alignment.csv",
+        "sample_rsa_spearman",
+        "CEe vs CIEDE2000 Sample RSA Across Random Seeds",
+    ),
+    "cee_cielab_centroid_rsa": rsa_spec(
+        "encoding_side/cee_cielab_alignment.csv",
+        "centroid_rsa_spearman",
+        "CEe vs CIEDE2000 Centroid RSA Across Random Seeds",
+    ),
+    "cee_image_sample_rsa": rsa_spec(
+        "encoding_side/cee_image_alignment.csv",
+        "sample_rsa_spearman",
+        "CEe vs Image Sample RSA Across Random Seeds",
+    ),
+    "cee_image_centroid_rsa": rsa_spec(
+        "encoding_side/cee_image_alignment.csv",
+        "centroid_rsa_spearman",
+        "CEe vs Image Centroid RSA Across Random Seeds",
+    ),
+    "ceg_decision_cielab_sample_rsa": rsa_spec(
+        "ceg_generation_side/rdm/ceg_decision_cielab_alignment.csv",
+        "sample_rsa_spearman",
+        "CEg-decision vs CIEDE2000 Sample RSA Across Random Seeds",
+    ),
+    "ceg_decision_cielab_centroid_rsa": rsa_spec(
+        "ceg_generation_side/rdm/ceg_decision_cielab_alignment.csv",
+        "centroid_rsa_spearman",
+        "CEg-decision vs CIEDE2000 Centroid RSA Across Random Seeds",
+    ),
+    "ceg_token_from_generate_cielab_sample_rsa": rsa_spec(
+        "ceg_generation_side/rdm/ceg_token_from_generate_cielab_alignment.csv",
+        "sample_rsa_spearman",
+        "CEg-token-from-generate vs CIEDE2000 Sample RSA Across Random Seeds",
+    ),
+    "ceg_token_from_generate_cielab_centroid_rsa": rsa_spec(
+        "ceg_generation_side/rdm/ceg_token_from_generate_cielab_alignment.csv",
+        "centroid_rsa_spearman",
+        "CEg-token-from-generate vs CIEDE2000 Centroid RSA Across Random Seeds",
+    ),
+    "ceg_decision_image_sample_rsa": rsa_spec(
+        "ceg_generation_side/rdm/ceg_decision_image_alignment.csv",
+        "sample_rsa_spearman",
+        "CEg-decision vs Image Sample RSA Across Random Seeds",
+    ),
+    "ceg_decision_image_centroid_rsa": rsa_spec(
+        "ceg_generation_side/rdm/ceg_decision_image_alignment.csv",
+        "centroid_rsa_spearman",
+        "CEg-decision vs Image Centroid RSA Across Random Seeds",
+    ),
+    "ceg_token_from_generate_image_sample_rsa": rsa_spec(
+        "ceg_generation_side/rdm/ceg_token_from_generate_image_alignment.csv",
+        "sample_rsa_spearman",
+        "CEg-token-from-generate vs Image Sample RSA Across Random Seeds",
+    ),
+    "ceg_token_from_generate_image_centroid_rsa": rsa_spec(
+        "ceg_generation_side/rdm/ceg_token_from_generate_image_alignment.csv",
+        "centroid_rsa_spearman",
+        "CEg-token-from-generate vs Image Centroid RSA Across Random Seeds",
+    ),
+    "ceg_decision_text_true_label_rsa": rsa_spec(
+        "ceg_generation_side/similarity/ceg_decision_vs_text_true_label_layerwise.csv",
+        "rsa_spearman",
+        "CEg-decision vs Text True-label RSA Across Random Seeds",
+    ),
+    "ceg_decision_text_predicted_label_rsa": rsa_spec(
+        "ceg_generation_side/similarity/ceg_decision_vs_text_predicted_label_layerwise.csv",
+        "rsa_spearman",
+        "CEg-decision vs Text Predicted-label RSA Across Random Seeds",
+    ),
+    "ceg_token_from_generate_text_true_label_rsa": rsa_spec(
+        "ceg_generation_side/similarity/ceg_token_from_generate_vs_text_true_label_layerwise.csv",
+        "rsa_spearman",
+        "CEg-token-from-generate vs Text True-label RSA Across Random Seeds",
+    ),
+    "ceg_token_from_generate_text_predicted_label_rsa": rsa_spec(
+        "ceg_generation_side/similarity/ceg_token_from_generate_vs_text_predicted_label_layerwise.csv",
+        "rsa_spearman",
+        "CEg-token-from-generate vs Text Predicted-label RSA Across Random Seeds",
+    ),
 }
 
 

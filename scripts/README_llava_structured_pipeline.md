@@ -40,6 +40,8 @@ The color naming step evaluates two prompt conditions:
 - `force_choice`: lists the 11 basic color names.
 - `no_color_list`: asks for one basic color name without listing candidates.
 
+Patch sampling uses `majority_count > 2` by default. If a color has fewer than 10 samples after that filter, that color falls back to `majority_count >= 2`. Black is a special case: if strict black samples are fewer than `samples_per_color`, it is filled with `majority_count == 2` black samples.
+
 The CEg step uses this prompt by default:
 
 ```text
