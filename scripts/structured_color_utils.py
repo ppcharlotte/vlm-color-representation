@@ -84,6 +84,22 @@ class Dataset:
     def image_paths(self) -> list[str]:
         return [row["image_path"] for row in self.rows]
 
+    @property
+    def rgb(self) -> np.ndarray:
+        return np.asarray([[int(row["r"]), int(row["g"]), int(row["b"])] for row in self.rows], dtype=float)
+
+    @property
+    def human_probabilities(self) -> np.ndarray:
+        """Return normalized human vote distributions in BASIC_COLORS order."""
+        distributions = []
+        for row in self.rows:
+            probs = np.asarray([float(row.get(f"p_{color}") or 0.0) for color in BASIC_COLORS], dtype=float)
+            total = float(probs.sum())
+            if total <= 0:
+                raise ValueError("Dataset rows must contain non-empty p_<color> vote distributions.")
+            distributions.append(probs / total)
+        return np.vstack(distributions)
+
 
 def normalize_color(value: object) -> str:
     text = str(value or "").strip().lower()
@@ -124,38 +140,57 @@ def majority_count(row: dict[str, str]) -> int:
 
 
 def sample_color_rows(input_csv: Path, samples_per_color: int, seed: int) -> list[dict[str, str]]:
-    rows = read_csv_rows(input_csv)
+    selected, _available = sample_strict_majority_rows(input_csv, samples_per_color, seed)
+    for row in selected:
+        row["selection_majority_rule"] = "agreement_rate_gt_0.75_and_majority_count_ge_2"
+    return selected
+
+
+def sample_strict_majority_rows(
+    input_csv: Path,
+    samples_per_color: int,
+    seed: int,
+    min_agreement_exclusive: float = 0.75,
+    min_majority_count_inclusive: int = 2,
+) -> tuple[list[dict[str, str]], dict[str, int]]:
+    """Apply the preregistered strict majority filter with no class-specific fallback."""
     buckets: dict[str, list[dict[str, str]]] = {color: [] for color in BASIC_COLORS}
-    for row in rows:
-        label = normalize_color(row.get("majority_basic_color"))
-        if label in buckets:
-            buckets[label].append(row)
+    for row in read_csv_rows(input_csv):
+        color = normalize_color(row.get("majority_basic_color"))
+        agreement = float(row.get("agreement_rate") or 0.0)
+        count = int(float(row.get("majority_count") or 0))
+        if color in buckets and agreement > min_agreement_exclusive and count >= min_majority_count_inclusive:
+            out = dict(row)
+            out["basic_color"] = color
+            buckets[color].append(out)
+
+    available = {color: len(buckets[color]) for color in BASIC_COLORS}
     rng = random.Random(seed)
     selected = []
     for color in BASIC_COLORS:
-        strict = [row for row in buckets[color] if majority_count(row) > 2]
-        fallback = [row for row in buckets[color] if majority_count(row) == 2]
-        rng.shuffle(strict)
-        rng.shuffle(fallback)
-        if color == "black" and len(strict) < samples_per_color:
-            candidates = [(row, "majority_count_gt_2") for row in strict]
-            needed = samples_per_color - len(candidates)
-            candidates.extend((row, "black_fill_majority_count_eq_2") for row in fallback[:needed])
-        elif len(strict) >= 10:
-            candidates = [(row, "majority_count_gt_2") for row in strict[:samples_per_color]]
-        else:
-            relaxed = strict + fallback
-            rng.shuffle(relaxed)
-            candidates = [(row, "fallback_majority_count_ge_2") for row in relaxed[:samples_per_color]]
-        for row, rule in candidates:
-            out = dict(row)
-            out["basic_color"] = color
-            out["selection_majority_rule"] = rule
-            selected.append(out)
+        candidates = list(buckets[color])
+        rng.shuffle(candidates)
+        selected.extend(candidates[:samples_per_color])
     selected.sort(key=lambda row: (BASIC_COLORS.index(row["basic_color"]), int(row["r"]), int(row["g"]), int(row["b"])))
-    for idx, row in enumerate(selected):
-        row["sample_index"] = str(idx)
-    return selected
+    for index, row in enumerate(selected):
+        row["sample_index"] = str(index)
+    return selected, available
+
+
+def generate_perceptual_patch_dataset(selected_rows: list[dict[str, str]], output_dir: Path, patch_size: int) -> Dataset:
+    """Generate solid patches without introducing hard color labels."""
+    patches_dir = output_dir / "patches"
+    patches_dir.mkdir(parents=True, exist_ok=True)
+    out_rows = []
+    for index, row in enumerate(selected_rows):
+        r, g, b = int(row["r"]), int(row["g"]), int(row["b"])
+        rel_path = Path("patches") / f"sample_{index:04d}_{r:03d}_{g:03d}_{b:03d}.png"
+        image_path = output_dir / rel_path
+        Image.new("RGB", (patch_size, patch_size), (r, g, b)).save(image_path)
+        out = dict(row)
+        out.update({"sample_index": str(index), "image_path": str(rel_path), "absolute_image_path": str(image_path)})
+        out_rows.append(out)
+    return Dataset(out_rows)
 
 
 def generate_patch_dataset(selected_rows: list[dict[str, str]], output_dir: Path, patch_size: int) -> Dataset:
@@ -396,7 +431,7 @@ class LlavaHelper:
         self.vision_feature_layer = getattr(self.model.config, "vision_feature_layer", -2)
         self.vision_feature_select_strategy = getattr(self.model.config, "vision_feature_select_strategy", "default")
         self.vision_tower = None if self.is_onevision else self._find_vision_tower()
-        self.projector = None if self.is_onevision else self._find_projector()
+        self.projector = self._find_projector()
 
     def _resolve_path(self, root, dotted_path: str):
         current = root
@@ -418,11 +453,71 @@ class LlavaHelper:
         raise AttributeError("Could not find LLaVA vision tower")
 
     def _find_projector(self):
-        for path in ("multi_modal_projector", "model.multi_modal_projector", "mm_projector", "model.mm_projector", "projector", "model.projector"):
+        for path in (
+            "multi_modal_projector",
+            "model.multi_modal_projector",
+            "mm_projector",
+            "model.mm_projector",
+            "projector",
+            "model.projector",
+            "visual.merger",
+            "model.visual.merger",
+        ):
             projector = self._resolve_path(self.model, path)
             if projector is not None:
                 return projector
         raise AttributeError("Could not find LLaVA multimodal projector")
+
+    @staticmethod
+    def _first_tensor(value):
+        if hasattr(value, "detach") and hasattr(value, "shape"):
+            return value
+        if isinstance(value, dict):
+            for item in value.values():
+                tensor = LlavaHelper._first_tensor(item)
+                if tensor is not None:
+                    return tensor
+        if isinstance(value, (tuple, list)):
+            for item in value:
+                tensor = LlavaHelper._first_tensor(item)
+                if tensor is not None:
+                    return tensor
+        return None
+
+    @staticmethod
+    def _pool_visual_tensor(value, pooling: str):
+        tensor = LlavaHelper._first_tensor(value)
+        if tensor is None:
+            raise TypeError("Projector hook did not receive a tensor-like value")
+        if len(tensor.shape) == 1:
+            return tensor
+        flattened = tensor.reshape(-1, tensor.shape[-1])
+        return flattened.mean(dim=0) if pooling == "mean" else flattened[0]
+
+    def _forward_with_projector_capture(self, inputs, pooling: str):
+        """Run the real OneVision forward while capturing projector input/output."""
+        captured_pre = []
+        captured_post = []
+
+        def capture(_module, module_inputs, module_output):
+            captured_pre.append(self._pool_visual_tensor(module_inputs, pooling))
+            captured_post.append(self._pool_visual_tensor(module_output, pooling))
+
+        handle = self.projector.register_forward_hook(capture)
+        try:
+            outputs = self.model(**inputs, output_hidden_states=True, use_cache=False, return_dict=True)
+        finally:
+            handle.remove()
+        if not captured_pre or not captured_post:
+            raise RuntimeError("OneVision multimodal projector was not called during the image forward pass")
+        if len(captured_pre) != 1 or len(captured_post) != 1:
+            raise RuntimeError(
+                "Expected exactly one multimodal-projector call for a single-image forward pass; "
+                f"captured {len(captured_pre)} inputs and {len(captured_post)} outputs"
+            )
+        pre = captured_pre[0]
+        post = captured_post[0]
+        return outputs, pre, post
 
     def language_model(self):
         for path in ("language_model", "model.language_model", "model"):
@@ -470,14 +565,31 @@ class LlavaHelper:
             mask |= input_ids[0] == token_id
         return mask
 
-    def chat_prompt(self, prompt: str) -> str:
-        messages = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": prompt}]}]
+    def chat_prompt(self, prompt: str, with_image: bool = True) -> str:
+        content = ([{"type": "image"}] if with_image else []) + [{"type": "text", "text": prompt}]
+        messages = [{"role": "user", "content": content}]
         if hasattr(self.processor, "apply_chat_template"):
             try:
                 return self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
             except Exception:
                 pass
-        return f"USER: <image>\n{prompt}\nASSISTANT:"
+        image_prefix = "<image>\n" if with_image else ""
+        return f"USER: {image_prefix}{prompt}\nASSISTANT:"
+
+    def text_context_inputs_with_color_mask(self, statement: str, color: str):
+        """Same user statement/chat template as CEe, with the image omitted."""
+        text = self.chat_prompt(statement, with_image=False)
+        tokenizer = self.tokenizer()
+        try:
+            encoded = tokenizer(text, return_tensors="pt", return_offsets_mapping=True)
+            offsets = encoded.pop("offset_mapping", None)
+        except (TypeError, NotImplementedError):
+            encoded = tokenizer(text, return_tensors="pt")
+            offsets = None
+        inputs = _move_inputs(encoded, self.target_device(), self.model_dtype)
+        mask = self.color_token_mask(inputs["input_ids"], color, text, offsets)
+        model = self.model if self.is_onevision else self.language_model()
+        return model, inputs, mask, text
 
     def generate_details(self, image_path: str, prompt: str, max_new_tokens: int = 8, temperature: float = 0.0) -> dict:
         image = Image.open(image_path).convert("RGB")
@@ -526,11 +638,12 @@ class LlavaHelper:
             projected = projected.last_hidden_state
         return selected.detach().float().cpu().numpy(), projected.detach().float().cpu().numpy()
 
-    def expanded_language_inputs(self, image_path: str, prompt: str):
+    def expanded_language_inputs(self, image_path: str, prompt: str, projected=None):
         embedding_layer = self.embedding_layer()
         tokenizer = self.tokenizer()
         image_token_id = self.image_token_id()
-        _pre, projected = self.vision_features([image_path])
+        if projected is None:
+            _pre, projected = self.vision_features([image_path])
         image_features_t = self.torch.from_numpy(projected).to(self.device, dtype=embedding_layer.weight.dtype)
         encoded = tokenizer(self.chat_prompt(prompt), return_tensors="pt")
         input_ids = encoded["input_ids"].to(self.device)
@@ -565,7 +678,7 @@ class LlavaHelper:
                 pre, projected = self.vision_features([image_path])
                 pre_projector.append(pre[0].mean(axis=0) if pooling == "mean" else pre[0, 0])
                 post_projector.append(projected[0].mean(axis=0) if pooling == "mean" else projected[0, 0])
-                inputs_embeds, attention_mask, query_mask, (image_start, image_end) = self.expanded_language_inputs(image_path, prompt)
+                inputs_embeds, attention_mask, query_mask, (image_start, image_end) = self.expanded_language_inputs(image_path, prompt, projected)
                 outputs = language_model(
                     inputs_embeds=inputs_embeds,
                     attention_mask=attention_mask,
@@ -576,7 +689,12 @@ class LlavaHelper:
                 for out_idx, layer_idx in enumerate(layer_indices):
                     hidden = outputs.hidden_states[layer_idx][0]
                     image_tokens = hidden[image_start:image_end]
-                    query_tokens = hidden[query_mask]
+                    # With device_map="auto", later LM blocks can place their
+                    # hidden states on a different GPU from the input masks.
+                    # Boolean indexing requires the mask and tensor to share a
+                    # device, so move the mask for each selected layer.
+                    active_query_mask = query_mask.to(device=hidden.device, dtype=self.torch.bool)
+                    query_tokens = hidden[active_query_mask]
                     image_pooled = image_tokens.mean(dim=0) if pooling == "mean" else image_tokens[0]
                     query_pooled = query_tokens.mean(dim=0) if query_tokens.shape[0] else hidden.mean(dim=0)
                     image_layers[out_idx].append(image_pooled.detach().float().cpu().numpy())
@@ -592,12 +710,15 @@ class LlavaHelper:
     def _onevision_layerwise_image_and_query_embeddings(self, image_paths: list[str], prompt: str, layer_indices: list[int], pooling: str = "mean") -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         image_layers = [[] for _ in layer_indices]
         query_layers = [[] for _ in layer_indices]
-        base_image = []
+        pre_projector = []
+        post_projector = []
         with self.torch.no_grad():
             for image_path in image_paths:
                 image = Image.open(image_path).convert("RGB")
                 inputs = self.prepare_inputs(self.chat_prompt(prompt), image)
-                outputs = self.model(**inputs, output_hidden_states=True, use_cache=False, return_dict=True)
+                outputs, pre, post = self._forward_with_projector_capture(inputs, pooling)
+                pre_projector.append(pre.detach().float().cpu().numpy())
+                post_projector.append(post.detach().float().cpu().numpy())
                 input_ids = inputs["input_ids"]
                 attention = inputs.get("attention_mask")
                 image_mask = self.image_token_mask(input_ids)
@@ -612,20 +733,19 @@ class LlavaHelper:
                     query_mask = ~image_mask
                 for out_idx, layer_idx in enumerate(layer_indices):
                     hidden = outputs.hidden_states[layer_idx][0]
-                    image_tokens = hidden[image_mask]
-                    query_tokens = hidden[query_mask]
+                    # Hidden states may be sharded across GPUs independently of
+                    # the processor inputs when device_map="auto" is active.
+                    active_image_mask = image_mask.to(device=hidden.device, dtype=self.torch.bool)
+                    active_query_mask = query_mask.to(device=hidden.device, dtype=self.torch.bool)
+                    image_tokens = hidden[active_image_mask]
+                    query_tokens = hidden[active_query_mask]
                     image_pooled = image_tokens.mean(dim=0) if pooling == "mean" else image_tokens[0]
                     query_pooled = query_tokens.mean(dim=0) if query_tokens.shape[0] else hidden.mean(dim=0)
                     image_layers[out_idx].append(image_pooled.detach().float().cpu().numpy())
                     query_layers[out_idx].append(query_pooled.detach().float().cpu().numpy())
-                first_hidden = outputs.hidden_states[0][0]
-                first_image_tokens = first_hidden[image_mask]
-                first_image = first_image_tokens.mean(dim=0) if pooling == "mean" else first_image_tokens[0]
-                base_image.append(first_image.detach().float().cpu().numpy())
-        base_image = np.asarray(base_image, dtype=np.float32)
         return (
-            base_image,
-            base_image.copy(),
+            np.asarray(pre_projector, dtype=np.float32),
+            np.asarray(post_projector, dtype=np.float32),
             np.stack([np.vstack(v) for v in image_layers]).astype(np.float32),
             np.stack([np.vstack(v) for v in query_layers]).astype(np.float32),
         )
@@ -860,12 +980,83 @@ def rdm(embeddings: np.ndarray, metric: str = "cosine") -> np.ndarray:
         x = np.asarray(embeddings, dtype=float)
         diff = x[:, None, :] - x[None, :, :]
         return np.sqrt(np.sum(diff * diff, axis=-1))
-    return 1.0 - cosine_matrix(embeddings, embeddings)
+    if metric not in ("cosine", "pearson"):
+        raise ValueError(f"Unknown embedding distance: {metric}")
+    values = np.asarray(embeddings, dtype=float)
+    if metric == "pearson":
+        values = values - values.mean(axis=1, keepdims=True)
+    norms = np.linalg.norm(values, axis=1)
+    valid = np.isfinite(values).all(axis=1) & (norms > 1e-12)
+    result = np.clip(1.0 - cosine_matrix(values, values), 0.0, 2.0)
+    result[~valid, :] = np.nan
+    result[:, ~valid] = np.nan
+    np.fill_diagonal(result, 0.0)
+    return result
 
 
 def centroids(embeddings: np.ndarray, labels: list[str], colors: list[str] = BASIC_COLORS) -> np.ndarray:
     label_indices = labels_to_indices(labels, colors)
     return np.vstack([np.asarray(embeddings)[label_indices == idx].mean(axis=0) for idx in range(len(colors))])
+
+
+def soft_centroids(embeddings: np.ndarray, probabilities: np.ndarray) -> np.ndarray:
+    """Compute category prototypes weighted by human naming probabilities."""
+    x = np.asarray(embeddings, dtype=float)
+    weights = np.asarray(probabilities, dtype=float)
+    if weights.ndim != 2 or weights.shape[0] != x.shape[0]:
+        raise ValueError("probabilities must have shape [n_samples, n_categories]")
+    totals = weights.sum(axis=0)
+    if np.any(totals <= 0):
+        raise ValueError("Every color category must have positive total human weight")
+    return (weights.T @ x) / totals[:, None]
+
+
+def rdm_permutation_pvalue(
+    matrix_a: np.ndarray,
+    matrix_b: np.ndarray,
+    corr_fn=spearman_corr,
+    rounds: int = 1000,
+    seed: int = 42,
+) -> tuple[float, float, int]:
+    """Matrix-label permutation test for two dependent-distance matrices.
+
+    Each null draw applies one permutation to both axes of ``matrix_b``. This
+    preserves the dependence structure among pairwise distances, unlike
+    shuffling the flattened upper triangle.
+    """
+    a = np.asarray(matrix_a, dtype=float)
+    b = np.asarray(matrix_b, dtype=float)
+    if a.shape != b.shape or a.ndim != 2 or a.shape[0] != a.shape[1]:
+        raise ValueError("RDMs must be square matrices with identical shapes")
+    observed_a = upper_triangle_values(a)
+    observed_b = upper_triangle_values(b)
+    rank_matrix = None
+    if corr_fn is spearman_corr:
+        ranked_a = rankdata_average(observed_a)
+        ranked_b = rankdata_average(observed_b)
+        observed = pearson_corr(ranked_a, ranked_b)
+        rank_matrix = np.zeros_like(b, dtype=float)
+        tri = np.triu_indices(b.shape[0], k=1)
+        rank_matrix[tri] = ranked_b
+        rank_matrix[(tri[1], tri[0])] = ranked_b
+    else:
+        observed = corr_fn(observed_a, observed_b)
+    if not np.isfinite(observed):
+        return float(observed), float("nan"), int(np.sum(np.isfinite(observed_a) & np.isfinite(observed_b)))
+    rng = np.random.default_rng(seed)
+    extreme = 0
+    for _ in range(rounds):
+        order = rng.permutation(a.shape[0])
+        if rank_matrix is not None:
+            permuted_values = upper_triangle_values(rank_matrix[np.ix_(order, order)])
+            null_value = pearson_corr(ranked_a, permuted_values)
+        else:
+            permuted = b[np.ix_(order, order)]
+            null_value = corr_fn(observed_a, upper_triangle_values(permuted))
+        if np.isfinite(null_value) and abs(null_value) >= abs(observed):
+            extreme += 1
+    n = int(np.sum(np.isfinite(observed_a) & np.isfinite(observed_b)))
+    return float(observed), float((extreme + 1) / (rounds + 1)), n
 
 
 def finite_pair_rows(a: np.ndarray, b: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -1140,4 +1331,3 @@ def logistic_regression_1d(x: np.ndarray, y: np.ndarray, steps: int = 4000, lr: 
         intercept -= lr * float(np.mean(probs - y))
     probs = 1 / (1 + np.exp(-np.clip(coef * xz + intercept, -30, 30)))
     return {"n": int(len(x)), "coef": float(coef), "intercept": float(intercept), "accuracy": float(np.mean((probs >= 0.5) == y))}
-

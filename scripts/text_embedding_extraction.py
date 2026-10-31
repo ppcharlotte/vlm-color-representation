@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from layer_selection import resolve_layers
 from pathlib import Path
 
 import numpy as np
@@ -11,8 +12,8 @@ import numpy as np
 from structured_color_utils import BASIC_COLORS, TEXT_CONTEXTS, LlavaHelper, rdm, save_line_plot, save_matrix_csv, write_csv, write_json
 
 
-def parse_layers(text: str) -> list[int]:
-    return [int(part.strip()) for part in text.split(",") if part.strip()]
+def parse_layers(text: str, model_id=None) -> list[int]:
+    return resolve_layers(text, model_id)
 
 
 def parse_args() -> argparse.Namespace:
@@ -21,7 +22,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-id", default="llava-hf/llava-1.5-7b-hf")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--dtype", default="auto", choices=("auto", "float16", "bfloat16", "float32"))
-    parser.add_argument("--layer-indices", default="0,1,8,16,24,32")
+    parser.add_argument("--layer-indices", default="all", help="all LM hidden states (default), or comma-separated indices")
     parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
 
@@ -29,7 +30,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     output = args.output_dir
-    layer_indices = parse_layers(args.layer_indices)
+    layer_indices = parse_layers(args.layer_indices, args.model_id)
     helper = LlavaHelper(args.model_id, args.device, args.dtype, args.seed)
     text_layers, context_layers = helper.layerwise_text_embeddings(BASIC_COLORS, TEXT_CONTEXTS, layer_indices)
     embeddings_dir = output / "embeddings"
@@ -42,6 +43,8 @@ def main() -> None:
         layer_indices=np.asarray(layer_indices),
         colors=np.asarray(BASIC_COLORS),
         contexts=np.asarray(TEXT_CONTEXTS),
+        model_id=np.asarray(args.model_id),
+        seed=np.asarray(args.seed),
     )
 
     rows = []
