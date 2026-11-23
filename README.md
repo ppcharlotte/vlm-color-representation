@@ -118,7 +118,3 @@ All results are saved under `--output-dir`:
 | `summary.json` | Overall pipeline summary |
 
 CEg analysis includes only samples with successfully parsed color tokens and available hidden states. Check sample inclusion before comparing results across conditions.
-
-## Validation
-
-Dataset generation was checked locally with two samples per category, producing 22 patches. Full GPU inference was not run while preparing this README.
