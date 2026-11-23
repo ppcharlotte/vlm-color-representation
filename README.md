@@ -1,4 +1,4 @@
-# VLM Color Representation
+# Color Encoding in Multimodal Language Models
 
 Analyze how vision-language models represent color and how those representations align with perceptual color geometry.
 
