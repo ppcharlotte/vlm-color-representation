@@ -118,3 +118,7 @@ All results are saved under `--output-dir`:
 | `summary.json` | Overall pipeline summary |
 
 CEg analysis includes only samples with successfully parsed color tokens and available hidden states. Check sample inclusion before comparing results across conditions.
+
+## License
+
+The original code and documentation in this repository are licensed under the [MIT License](LICENSE). Third-party survey data, model weights, and dependencies remain subject to their respective licenses.
